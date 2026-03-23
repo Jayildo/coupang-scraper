@@ -1,0 +1,8 @@
+.env
+.cookies.json
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+debug_*.png
