@@ -90,7 +90,8 @@ def run(page):
 
 def _set_search_type(page):
     """Period Search 드롭다운에서 '입고예정일' 또는 'Receiving Scheduled' 선택."""
-    # select 요소 찾기 (Period Search 옆의 드롭다운)
+
+    # 1) 네이티브 <select> 탐색
     selects = page.query_selector_all("select")
     for sel in selects:
         try:
@@ -101,12 +102,54 @@ def _set_search_type(page):
             for opt in options:
                 txt = (opt.inner_text() or "").strip()
                 val = opt.get_attribute("value") or ""
-                if "입고" in txt or "Receiving" in txt:
+                if "입고" in txt or "Receiving" in txt or "receiving" in val.lower():
                     sel.select_option(value=val)
-                    log.info(f"[PO_SKU] 검색조건 선택: {txt}")
+                    log.info(f"[PO_SKU] 검색조건 선택 (native): {txt}")
                     return True
         except Exception:
             continue
+
+    # 2) React/커스텀 드롭다운 탐색 (상단 검색 영역 내)
+    #    드롭다운 트리거를 클릭 → 옵션 목록에서 입고예정일 선택
+    dropdown_selectors = [
+        '[class*="select"]',
+        '[class*="dropdown"]',
+        '[class*="combo"]',
+        '[role="combobox"]',
+        '[role="listbox"]',
+    ]
+    for sel in dropdown_selectors:
+        els = page.query_selector_all(sel)
+        for el in els:
+            try:
+                box = el.bounding_box()
+                if not box or box["y"] > 300:
+                    continue
+                # 드롭다운 텍스트 확인 (현재 선택값)
+                txt = (el.inner_text() or "").strip()
+                # 이미 입고예정일이면 스킵
+                if "입고" in txt or "Receiving" in txt:
+                    log.info(f"[PO_SKU] 이미 입고예정일 선택됨: {txt}")
+                    return True
+                # 기간 관련 드롭다운이면 클릭해서 옵션 탐색
+                if any(k in txt for k in ["발주", "Order", "기간", "Period", "날짜", "Date"]):
+                    el.click()
+                    short_delay(0.5, 1)
+                    # 열린 옵션 목록에서 입고예정일 찾기
+                    for kr_txt in ["입고예정일", "입고 예정일", "Receiving Scheduled", "Receiving"]:
+                        opt = page.query_selector(
+                            f'li:has-text("{kr_txt}"), div[role="option"]:has-text("{kr_txt}"), '
+                            f'option:has-text("{kr_txt}"), [class*="option"]:has-text("{kr_txt}")'
+                        )
+                        if opt:
+                            opt.click()
+                            log.info(f"[PO_SKU] 검색조건 선택 (custom): {kr_txt}")
+                            return True
+                    # 옵션 못 찾으면 Escape로 닫기
+                    page.keyboard.press("Escape")
+                    short_delay(0.3, 0.5)
+            except Exception:
+                continue
 
     log.warning("[PO_SKU] 입고예정일 드롭다운 못 찾음 (기본값 사용)")
     return False
@@ -114,69 +157,163 @@ def _set_search_type(page):
 
 def _set_date_range(page, start_date, end_date):
     """날짜 입력 필드에 시작/종료 날짜 설정."""
-    # 스크린샷에서 확인: 2개의 input 필드 (시작일 ~ 종료일)
-    date_inputs = page.query_selector_all('input[type="text"]')
     date_fields = []
 
-    for inp in date_inputs:
+    # 전략 1: input[type="date"] 직접 탐색
+    for inp in page.query_selector_all('input[type="date"]'):
         try:
             box = inp.bounding_box()
-            if not box or box["y"] > 300:
-                continue
-            value = inp.get_attribute("value") or ""
-            # 날짜 형식(YYYY-MM-DD)인 필드 식별
-            if _looks_like_date(value) or box["y"] < 200:
-                # 날짜 필드인지 추가 확인 (캘린더 아이콘 옆)
-                width = box.get("width", 0)
-                if width > 80:  # 너무 좁은 필드 제외
-                    date_fields.append((box["x"], inp, value))
+            if box and box["y"] < 300 and box.get("width", 0) > 60:
+                value = inp.get_attribute("value") or ""
+                date_fields.append((box["x"], inp, value, "date-type"))
         except Exception:
             continue
 
-    # 날짜 형식인 것만 필터
-    date_fields = [(x, inp, v) for x, inp, v in date_fields if _looks_like_date(v)]
+    # 전략 2: text input 중 날짜 형식이거나 날짜 관련 속성이 있는 것
+    if len(date_fields) < 2:
+        for inp in page.query_selector_all('input[type="text"], input:not([type])'):
+            try:
+                box = inp.bounding_box()
+                if not box or box["y"] > 300 or box.get("width", 0) < 60:
+                    continue
+                value = inp.get_attribute("value") or ""
+                placeholder = inp.get_attribute("placeholder") or ""
+                cls = inp.get_attribute("class") or ""
+                name = inp.get_attribute("name") or ""
+                # 날짜 필드 식별: 값이 날짜이거나, placeholder/class/name에 date 관련 힌트
+                is_date = (
+                    _looks_like_date(value)
+                    or _looks_like_date(placeholder)
+                    or any(k in cls.lower() for k in ["date", "calendar", "picker"])
+                    or any(k in name.lower() for k in ["date", "from", "to", "start", "end"])
+                    or any(k in placeholder.lower() for k in ["yyyy", "날짜", "date"])
+                )
+                if is_date:
+                    # 기존 목록에 같은 요소가 없는 경우만 추가
+                    if not any(f[1] == inp for f in date_fields):
+                        date_fields.append((box["x"], inp, value, "text-hint"))
+            except Exception:
+                continue
+
+    # 전략 3: 검색 영역(y < 200) 내 인접한 input 쌍 (구분자 ~ 사이)
+    if len(date_fields) < 2:
+        all_inputs = []
+        for inp in page.query_selector_all('input[type="text"], input:not([type])'):
+            try:
+                box = inp.bounding_box()
+                if box and box["y"] < 250 and 70 < box.get("width", 0) < 200:
+                    value = inp.get_attribute("value") or ""
+                    all_inputs.append((box["x"], box["y"], inp, value))
+            except Exception:
+                continue
+        # y좌표가 비슷한 인접 쌍 찾기 (같은 행의 시작일~종료일)
+        all_inputs.sort(key=lambda x: (round(x[1] / 30), x[0]))  # 행별 그룹, x순 정렬
+        for i in range(len(all_inputs) - 1):
+            ax, ay, a_inp, a_val = all_inputs[i]
+            bx, by, b_inp, b_val = all_inputs[i + 1]
+            if abs(ay - by) < 15 and 30 < (bx - ax) < 400:
+                # 이미 수집한 것과 중복 체크
+                existing = {id(f[1]) for f in date_fields}
+                if id(a_inp) not in existing and id(b_inp) not in existing:
+                    date_fields = [(ax, a_inp, a_val, "pair"), (bx, b_inp, b_val, "pair")]
+                    log.info(f"[PO_SKU] 인접 input 쌍으로 날짜 필드 추론 (y≈{ay:.0f})")
+                    break
 
     if len(date_fields) >= 2:
         date_fields.sort(key=lambda x: x[0])
+        log.info(f"[PO_SKU] 날짜 필드 {len(date_fields)}개 발견 (방법: {date_fields[0][3]}, {date_fields[1][3]})")
         _fill_date(page, date_fields[0][1], start_date)
         short_delay(0.5, 1)
         _fill_date(page, date_fields[1][1], end_date)
         log.info(f"[PO_SKU] 날짜 설정 완료: {start_date} ~ {end_date}")
     else:
         log.warning(f"[PO_SKU] 날짜 필드 {len(date_fields)}개 발견 (2개 필요)")
+        # 디버그: 상단 input 전체 덤프
+        _dump_inputs(page)
         screenshot(page, "order_sku_date_fields_debug")
 
 
 def _fill_date(page, input_el, date_str):
-    """날짜 입력 필드에 값 설정."""
+    """날짜 입력 필드에 값 설정. 키보드 입력 → JS 직접설정 → React setter 순 시도."""
+    old_val = input_el.get_attribute("value") or ""
+
+    # 시도 1: 키보드 입력 (가장 자연스러움)
     try:
         input_el.click()
         short_delay(0.3, 0.5)
-        # 전체 선택 후 덮어쓰기
         page.keyboard.press("Control+a")
         short_delay(0.1, 0.2)
         page.keyboard.type(date_str, delay=50)
         short_delay(0.3, 0.5)
-        # datepicker 닫기
         page.keyboard.press("Escape")
         short_delay(0.2, 0.3)
         page.keyboard.press("Tab")
+        short_delay(0.3, 0.5)
+        new_val = input_el.get_attribute("value") or ""
+        if new_val != old_val:
+            log.info(f"[PO_SKU] 날짜 입력 성공 (keyboard): {old_val} → {new_val}")
+            return
     except Exception as e:
-        log.warning(f"[PO_SKU] 날짜 입력 실패: {e}")
-        try:
-            input_el.evaluate(
-                f'el => {{ el.value = "{date_str}"; '
-                f'el.dispatchEvent(new Event("change", {{bubbles: true}})); }}'
-            )
-        except Exception:
-            pass
+        log.warning(f"[PO_SKU] 키보드 입력 실패: {e}")
+
+    # 시도 2: JS로 값 설정 + React input 이벤트 트리거
+    try:
+        input_el.evaluate(
+            '''(el, val) => {
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, "value"
+                ).set;
+                nativeInputValueSetter.call(el, val);
+                el.dispatchEvent(new Event("input", {bubbles: true}));
+                el.dispatchEvent(new Event("change", {bubbles: true}));
+            }''',
+            date_str,
+        )
+        short_delay(0.3, 0.5)
+        new_val = input_el.get_attribute("value") or ""
+        log.info(f"[PO_SKU] 날짜 입력 (JS setter): {old_val} → {new_val}")
+    except Exception as e:
+        log.warning(f"[PO_SKU] JS 날짜 입력도 실패: {e}")
 
 
 def _looks_like_date(value):
-    """값이 날짜 형식인지 확인."""
-    if not value or len(value) < 8:
+    """값이 날짜 형식인지 확인 (다양한 포맷 지원)."""
+    if not value or len(value) < 6:
         return False
-    return "-" in value and any(c.isdigit() for c in value)
+    v = value.strip()
+    # YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
+    if any(sep in v for sep in ["-", "/", "."]) and sum(c.isdigit() for c in v) >= 6:
+        return True
+    # YYYYMMDD (구분자 없음)
+    if v.isdigit() and len(v) == 8:
+        return True
+    # MM/DD/YYYY 등
+    if sum(c.isdigit() for c in v) >= 6 and len(v) <= 12:
+        return True
+    return False
+
+
+def _dump_inputs(page):
+    """디버그: 상단 영역 input 요소 전체 덤프."""
+    inputs = page.query_selector_all("input")
+    for i, inp in enumerate(inputs):
+        try:
+            box = inp.bounding_box()
+            if not box or box["y"] > 350:
+                continue
+            attrs = {
+                "type": inp.get_attribute("type") or "",
+                "name": inp.get_attribute("name") or "",
+                "value": inp.get_attribute("value") or "",
+                "placeholder": inp.get_attribute("placeholder") or "",
+                "class": (inp.get_attribute("class") or "")[:60],
+            }
+            log.info(
+                f"[DEBUG INPUT #{i}] x={box['x']:.0f} y={box['y']:.0f} "
+                f"w={box.get('width', 0):.0f} | {attrs}"
+            )
+        except Exception:
+            continue
 
 
 def _do_download(page):

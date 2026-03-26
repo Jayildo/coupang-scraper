@@ -107,9 +107,68 @@ def _save_cookies(page):
 
 
 def _switch_to_korean(page):
-    """UI 언어를 한국어로 전환 (우측 상단 언어 드롭다운)."""
+    """UI 언어를 한국어로 전환. 쿠키 + UI 클릭 이중 전략."""
+
+    # 이미 한국어인지 확인
+    if _is_korean(page):
+        log.info("[LANG] 이미 한국어 UI")
+        return True
+
+    # 전략 1: locale 쿠키 직접 설정 (가장 안정적)
+    cookie_set = _set_locale_cookie(page)
+
+    # 전략 2: UI 드롭다운 클릭 (폴백)
+    if not cookie_set:
+        _click_language_ui(page)
+
+    # 전략 3: URL 파라미터로 locale 강제
+    _navigate_with_locale(page)
+
+    # 검증
+    if _is_korean(page):
+        log.info("[LANG] 한국어 전환 성공")
+        return True
+
+    log.warning("[LANG] 한국어 전환 불확실 - 한/영 양쪽 텍스트로 폴백 동작")
+    return False
+
+
+def _is_korean(page):
+    """현재 페이지가 한국어 UI인지 확인."""
     try:
-        # "English" 또는 언어 드롭다운 찾기
+        # 상단 네비게이션에서 한국어 텍스트 존재 확인
+        body_text = page.inner_text("body")[:2000]
+        kr_indicators = ["대시보드", "물류", "정산", "광고", "상품", "한국어"]
+        en_indicators = ["Dashboard", "Logistics", "Settlement", "Marketing", "English"]
+        kr_count = sum(1 for k in kr_indicators if k in body_text)
+        en_count = sum(1 for k in en_indicators if k in body_text)
+        return kr_count > en_count
+    except Exception:
+        return False
+
+
+def _set_locale_cookie(page):
+    """브라우저 쿠키로 locale을 ko-KR로 설정."""
+    try:
+        # 쿠팡 supplier hub에서 사용하는 locale 쿠키 후보
+        locale_cookies = [
+            {"name": "locale", "value": "ko_KR", "domain": ".coupang.com", "path": "/"},
+            {"name": "lang", "value": "ko", "domain": ".coupang.com", "path": "/"},
+            {"name": "LOCALE", "value": "ko_KR", "domain": ".coupang.com", "path": "/"},
+            {"name": "locale", "value": "ko_KR", "domain": "supplier.coupang.com", "path": "/"},
+            {"name": "lang", "value": "ko", "domain": "supplier.coupang.com", "path": "/"},
+        ]
+        page.context.add_cookies(locale_cookies)
+        log.info("[LANG] locale 쿠키 설정: ko_KR")
+        return True
+    except Exception as e:
+        log.warning(f"[LANG] 쿠키 설정 실패: {e}")
+        return False
+
+
+def _click_language_ui(page):
+    """UI 드롭다운으로 언어 전환."""
+    try:
         lang_selectors = [
             'button:has-text("English")',
             'a:has-text("English")',
@@ -122,30 +181,46 @@ def _switch_to_korean(page):
             for el in els:
                 try:
                     box = el.bounding_box()
-                    if box and box["y"] < 50:  # 상단 네비게이션 영역
+                    if box and box["y"] < 60:
                         el.click()
                         short_delay(1, 2)
-                        # 한국어 옵션 클릭
-                        kr_options = ['한국어', 'Korean', 'ko-KR', 'ko']
-                        for kr in kr_options:
-                            kr_el = page.query_selector(f'a:has-text("{kr}"), li:has-text("{kr}"), div:has-text("{kr}"), option:has-text("{kr}")')
+                        for kr in ['한국어', 'Korean', 'ko-KR', 'ko']:
+                            kr_el = page.query_selector(
+                                f'a:has-text("{kr}"), li:has-text("{kr}"), '
+                                f'div:has-text("{kr}"), option:has-text("{kr}")'
+                            )
                             if kr_el:
                                 kr_el.click()
-                                log.info("[LANG] 한국어로 전환")
+                                log.info("[LANG] UI 클릭으로 한국어 전환")
                                 time.sleep(3)
                                 try:
                                     page.wait_for_load_state("networkidle", timeout=15000)
                                 except Exception:
                                     pass
-                                time.sleep(3)
+                                time.sleep(2)
                                 return True
                 except Exception:
                     continue
-
-        log.info("[LANG] 이미 한국어이거나 언어 버튼 못 찾음")
     except Exception as e:
-        log.warning(f"[LANG] 언어 전환 실패: {e}")
+        log.warning(f"[LANG] UI 전환 실패: {e}")
     return False
+
+
+def _navigate_with_locale(page):
+    """현재 페이지를 locale 파라미터 포함하여 새로고침."""
+    try:
+        current_url = page.url
+        # /KR 경로가 있으면 유지, locale 쿠키가 설정된 상태에서 reload
+        page.reload()
+        time.sleep(3)
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        time.sleep(2)
+        log.info(f"[LANG] 페이지 리로드 완료: {page.url}")
+    except Exception as e:
+        log.warning(f"[LANG] 리로드 실패: {e}")
 
 
 def _main_action(page):
