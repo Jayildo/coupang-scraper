@@ -39,7 +39,7 @@ def run(page):
     _set_search_type(page)
     short_delay(1, 2)
 
-    # 2. 날짜 범위: D+1 ~ D+30
+    # 2. 날짜 범위: D+1 ~ D+30 (입고예정일 기준)
     today = datetime.now()
     start_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
     end_date = (today + timedelta(days=30)).strftime("%Y-%m-%d")

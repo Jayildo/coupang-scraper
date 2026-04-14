@@ -12,7 +12,7 @@ from curl_cffi.requests import Session
 
 from config import (
     COUPANG_ID, COUPANG_PW, LOGIN_URL, BASE_URL,
-    COOKIE_FILE, DATA_DIR
+    COOKIE_FILE, DATA_DIR, HEADLESS,
 )
 
 log = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ def login_fresh():
 
     page = StealthyFetcher.fetch(
         LOGIN_URL,
-        headless=False,
+        headless=HEADLESS,
         disable_resources=False,
         page_action=_browser_login,
         wait_selector="body",

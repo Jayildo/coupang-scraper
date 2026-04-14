@@ -99,13 +99,13 @@ def _wait_and_download_from_history(page, max_wait=120):
                 if "sku_download" not in text:
                     continue
 
-                # DONE 상태인 경우 → href 추출 후 다운로드
-                if "DONE" in text:
-                    log.info("[SKU] 파일 생성 완료 (DONE), 다운로드 시작")
+                # DONE 상태인 경우 → href 추출 후 다운로드 (한/영 모두)
+                if "DONE" in text or "파일 다운로드 완료" in text or "다운로드 완료" in text:
+                    log.info("[SKU] 파일 생성 완료, 다운로드 시작")
                     return _download_done_file(page)
 
-                # Generating 상태 → 대기
-                if "Generating" in text or "생성" in text:
+                # Generating 상태 → 대기 (한/영 모두)
+                if "Generating" in text or "생성 중" in text or "생성중" in text:
                     elapsed = int(time.time() - start)
                     log.info(f"[SKU] 파일 생성 중... ({elapsed}s 경과)")
                     break
@@ -130,7 +130,9 @@ def _download_done_file(page):
     for row in rows:
         try:
             text = (row.inner_text() or "").strip()
-            if "sku_download" not in text or "DONE" not in text:
+            if "sku_download" not in text:
+                continue
+            if "DONE" not in text and "파일 다운로드 완료" not in text and "다운로드 완료" not in text:
                 continue
 
             link = row.query_selector("a")

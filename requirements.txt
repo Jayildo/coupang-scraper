@@ -1,2 +1,5 @@
-scrapling
-python-dotenv
+scrapling==0.4.1
+curl_cffi>=0.7.0
+python-dotenv>=1.0.0
+supabase>=2.0.0
+

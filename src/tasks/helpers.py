@@ -83,29 +83,38 @@ def navigate_menu(page, main_menu, sub_menu=None):
     }
     en_name = kr_main.get(main_menu, main_menu)
 
-    # 메인 메뉴 클릭 (한글/영문 모두 시도)
-    for name in [main_menu, en_name]:
-        links = page.query_selector_all(f'li > a:has-text("{name}")')
-        if not links:
-            links = page.query_selector_all(f'a:has-text("{name}")')
-        for link in links:
+    # 상단 네비게이션 로딩 대기 (대시보드가 무거울 수 있음)
+    for attempt in range(3):
+        for name in [main_menu, en_name]:
             try:
-                box = link.bounding_box()
-                if box and box["y"] < 80:
-                    link.click()
-                    log.info(f"[NAV] 메인: {name}")
-                    time.sleep(3)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    time.sleep(2)
-
-                    if sub_menu:
-                        return _click_submenu(page, sub_menu)
-                    return True
+                page.wait_for_selector(f'a:has-text("{name}")', timeout=5000)
             except Exception:
                 continue
+            links = page.query_selector_all(f'li > a:has-text("{name}")')
+            if not links:
+                links = page.query_selector_all(f'a:has-text("{name}")')
+            for link in links:
+                try:
+                    box = link.bounding_box()
+                    if box and box["y"] < 80:
+                        link.click()
+                        log.info(f"[NAV] 메인: {name}")
+                        time.sleep(3)
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=15000)
+                        except Exception:
+                            pass
+                        time.sleep(2)
+
+                        if sub_menu:
+                            return _click_submenu(page, sub_menu)
+                        return True
+                except Exception:
+                    continue
+        # 메뉴를 못 찾으면 잠시 대기 후 재시도
+        if attempt < 2:
+            log.info(f"[NAV] 메뉴 '{main_menu}' 대기 중... (시도 {attempt + 1}/3)")
+            time.sleep(3)
 
     log.warning(f"[NAV FAIL] 메인 메뉴 '{main_menu}' 못 찾음")
     return False

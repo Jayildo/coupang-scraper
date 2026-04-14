@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Coupang Scraper Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    body { font-family: -apple-system, "Apple SD Gothic Neo", "Segoe UI", sans-serif; }
+    .badge-success { @apply bg-green-100 text-green-800; }
+    .badge-failed  { @apply bg-red-100 text-red-800; }
+    .badge-running { @apply bg-yellow-100 text-yellow-800; }
+    table { border-collapse: collapse; }
+    th, td { padding: 6px 10px; text-align: left; font-size: 13px; }
+    th { background: #f3f4f6; font-weight: 600; }
+    tr:nth-child(even) td { background: #fafafa; }
+    .mono { font-family: 'SF Mono', Consolas, Monaco, monospace; font-size: 12px; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-7xl mx-auto p-6">
+    <header class="mb-6 flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold">Coupang Scraper Dashboard</h1>
+        <p class="text-sm text-gray-500">project: <span class="mono">cyjhuqsyzatrktpguurj</span></p>
+      </div>
+      <button id="refreshBtn" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">
+        ↻ 새로고침
+      </button>
+    </header>
+
+    <!-- 요약 카드 -->
+    <section id="summary" class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-xs text-gray-500">analytics_daily</div>
+        <div class="text-2xl font-bold mt-1" id="card-analytics">-</div>
+        <div class="text-xs text-gray-400 mt-1" id="card-analytics-sub"></div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-xs text-gray-500">po_sku_current (active)</div>
+        <div class="text-2xl font-bold mt-1" id="card-po">-</div>
+        <div class="text-xs text-gray-400 mt-1" id="card-po-sub"></div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-xs text-gray-500">po_sku_history</div>
+        <div class="text-2xl font-bold mt-1" id="card-po-hist">-</div>
+        <div class="text-xs text-gray-400 mt-1" id="card-po-hist-sub"></div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-xs text-gray-500">sku_info (active)</div>
+        <div class="text-2xl font-bold mt-1" id="card-sku">-</div>
+        <div class="text-xs text-gray-400 mt-1" id="card-sku-sub"></div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="text-xs text-gray-500">milkrun versions</div>
+        <div class="text-2xl font-bold mt-1" id="card-milkrun">-</div>
+        <div class="text-xs text-gray-400 mt-1" id="card-milkrun-sub"></div>
+      </div>
+    </section>
+
+    <!-- 최근 실행 -->
+    <section class="bg-white rounded-lg shadow p-4 mb-6">
+      <h2 class="text-lg font-bold mb-3">최근 스크래퍼 실행 (scrape_runs)</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full" id="tbl-runs">
+          <thead>
+            <tr>
+              <th>task</th><th>status</th><th>processed</th><th>ins</th><th>upd</th>
+              <th>same</th><th>rm</th><th>started</th><th>duration</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- analytics_daily -->
+    <section class="bg-white rounded-lg shadow p-4 mb-6">
+      <h2 class="text-lg font-bold mb-3">analytics_daily — 일자별 매출 요약</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full" id="tbl-analytics">
+          <thead>
+            <tr>
+              <th>date</th><th class="text-right">rows</th>
+              <th class="text-right">총 GMV</th><th class="text-right">총 판매수량</th>
+              <th class="text-right">총 주문건수</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- po_sku 상태 분포 -->
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+      <div class="bg-white rounded-lg shadow p-4">
+        <h2 class="text-lg font-bold mb-3">po_sku_current — 발주 상태 분포</h2>
+        <table class="w-full" id="tbl-po-status">
+          <thead><tr><th>status</th><th class="text-right">count</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="bg-white rounded-lg shadow p-4">
+        <h2 class="text-lg font-bold mb-3">po_sku_history — 변경 이력 분포</h2>
+        <table class="w-full" id="tbl-po-hist">
+          <thead><tr><th>change_type</th><th class="text-right">count</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- po_sku_current 샘플 -->
+    <section class="bg-white rounded-lg shadow p-4 mb-6">
+      <h2 class="text-lg font-bold mb-3">po_sku_current — 최근 변경 20개</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full" id="tbl-po-recent">
+          <thead>
+            <tr>
+              <th>po_id</th><th>sku_id</th><th>status</th>
+              <th>sku_name</th><th class="text-right">qty</th>
+              <th>expected</th><th>last_changed</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- sku_info 샘플 -->
+    <section class="bg-white rounded-lg shadow p-4 mb-6">
+      <h2 class="text-lg font-bold mb-3">sku_info — 샘플 20개</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full" id="tbl-sku">
+          <thead><tr><th>sku_id</th><th>sku_name</th><th>status</th><th>last_changed</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- milkrun -->
+    <section class="bg-white rounded-lg shadow p-4 mb-6">
+      <h2 class="text-lg font-bold mb-3">milkrun_fee_versions</h2>
+      <table class="w-full" id="tbl-milkrun">
+        <thead>
+          <tr><th>id</th><th class="text-right">char_count</th>
+          <th>first_seen</th><th>last_seen</th><th>hash</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <footer class="text-center text-xs text-gray-400 mt-8">
+      RLS: anon SELECT only. service_role 키는 클라이언트에 노출되지 않음.
+    </footer>
+  </div>
+
+  <script>
+    // Supabase 설정 (anon key — RLS로 SELECT만 허용)
+    const SUPABASE_URL = "https://cyjhuqsyzatrktpguurj.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN5amh1cXN5emF0cmt0cGd1dXJqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU0MjIyNzIsImV4cCI6MjA5MDk5ODI3Mn0.9awws54_glEuhRU19FBxZO4SCAzxyUCpY4oYRxRFZ1w";
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const fmt = {
+      n: (v) => v == null ? "-" : Number(v).toLocaleString("ko-KR"),
+      money: (v) => v == null ? "-" : "₩" + Number(v).toLocaleString("ko-KR"),
+      ts: (v) => v == null ? "-" : new Date(v).toLocaleString("ko-KR"),
+      duration: (a, b) => {
+        if (!a || !b) return "-";
+        const ms = new Date(b) - new Date(a);
+        return ms < 1000 ? ms + "ms" : (ms / 1000).toFixed(1) + "s";
+      },
+    };
+
+    function setText(id, v) { document.getElementById(id).textContent = v; }
+
+    // PostgREST 기본 limit 1000 우회 — range() 페이지네이션으로 전부 가져오기
+    async function fetchAll(tableName, query) {
+      const PAGE = 1000;
+      let offset = 0;
+      const all = [];
+      while (true) {
+        let q = sb.from(tableName).select(query.select);
+        if (query.eq) for (const [k, v] of Object.entries(query.eq)) q = q.eq(k, v);
+        if (query.order) q = q.order(query.order.col, { ascending: query.order.asc !== false });
+        q = q.range(offset, offset + PAGE - 1);
+        const { data, error } = await q;
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        all.push(...data);
+        if (data.length < PAGE) break;
+        offset += PAGE;
+      }
+      return all;
+    }
+
+    function setRows(tblId, rows, cells) {
+      const tbody = document.querySelector(`#${tblId} tbody`);
+      tbody.innerHTML = "";
+      if (!rows || rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="20" class="text-gray-400 italic">데이터 없음</td></tr>`;
+        return;
+      }
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = cells(r);
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function loadAll() {
+      // 1. summary cards
+      const [analyticsCount, poActive, poHist, skuActive, milkrunVersions] = await Promise.all([
+        sb.from("analytics_daily").select("*", { count: "exact", head: true }),
+        sb.from("po_sku_current").select("*", { count: "exact", head: true }).eq("is_active", true),
+        sb.from("po_sku_history").select("*", { count: "exact", head: true }),
+        sb.from("sku_info").select("*", { count: "exact", head: true }).eq("is_active", true),
+        sb.from("milkrun_fee_versions").select("*", { count: "exact", head: true }),
+      ]);
+
+      setText("card-analytics", fmt.n(analyticsCount.count));
+      setText("card-po", fmt.n(poActive.count));
+      setText("card-po-hist", fmt.n(poHist.count));
+      setText("card-sku", fmt.n(skuActive.count));
+      setText("card-milkrun", fmt.n(milkrunVersions.count));
+
+      // analytics 날짜 범위
+      const { data: dRange } = await sb
+        .from("analytics_daily").select("date").order("date", { ascending: true }).limit(1);
+      const { data: dRangeMax } = await sb
+        .from("analytics_daily").select("date").order("date", { ascending: false }).limit(1);
+      if (dRange?.[0] && dRangeMax?.[0]) {
+        setText("card-analytics-sub", `${dRange[0].date} ~ ${dRangeMax[0].date}`);
+      }
+
+      // 2. scrape_runs 최근 12개
+      const { data: runs } = await sb
+        .from("scrape_runs")
+        .select("task_name,status,rows_processed,rows_inserted,rows_updated,rows_unchanged,rows_removed,started_at,finished_at")
+        .order("started_at", { ascending: false })
+        .limit(12);
+
+      setRows("tbl-runs", runs, (r) => `
+        <td class="font-medium">${r.task_name}</td>
+        <td><span class="px-2 py-0.5 rounded text-xs ${r.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">${r.status}</span></td>
+        <td class="text-right mono">${fmt.n(r.rows_processed)}</td>
+        <td class="text-right mono">${fmt.n(r.rows_inserted)}</td>
+        <td class="text-right mono">${fmt.n(r.rows_updated)}</td>
+        <td class="text-right mono">${fmt.n(r.rows_unchanged)}</td>
+        <td class="text-right mono">${fmt.n(r.rows_removed)}</td>
+        <td class="mono text-xs">${fmt.ts(r.started_at)}</td>
+        <td class="mono text-xs text-gray-500">${fmt.duration(r.started_at, r.finished_at)}</td>
+      `);
+
+      // 3. analytics 일자별 요약 — DB VIEW (서버 집계, row 수 = 일수만큼)
+      const { data: daily } = await sb
+        .from("v_analytics_daily_summary")
+        .select("*")
+        .order("date", { ascending: true });
+      setRows("tbl-analytics", daily, (r) => `
+        <td class="font-medium">${r.date}</td>
+        <td class="text-right mono">${fmt.n(r.row_count)}</td>
+        <td class="text-right mono">${fmt.money(r.total_gmv)}</td>
+        <td class="text-right mono">${fmt.n(r.total_units_sold)}</td>
+        <td class="text-right mono">${fmt.n(r.total_order_count)}</td>
+      `);
+
+      // 4. po_sku 상태 분포 — DB VIEW (서버 집계)
+      const { data: statusList } = await sb
+        .from("v_po_sku_status_summary")
+        .select("*");
+      setRows("tbl-po-status", statusList, (r) => `
+        <td>${r.status || "(없음)"}</td>
+        <td class="text-right mono">${fmt.n(r.count)}</td>
+      `);
+      setText("card-po-sub", `${(statusList||[]).length}개 상태`);
+
+      // 5. po_sku_history change_type 분포 — DB VIEW (서버 집계)
+      const { data: histSummary } = await sb
+        .from("v_po_sku_history_summary")
+        .select("*");
+      setRows("tbl-po-hist", histSummary, (r) => `
+        <td><span class="px-2 py-0.5 rounded text-xs ${
+          r.change_type === 'CREATED' ? 'bg-blue-100 text-blue-800' :
+          r.change_type === 'UPDATED' ? 'bg-yellow-100 text-yellow-800' :
+          'bg-red-100 text-red-800'
+        }">${r.change_type}</span></td>
+        <td class="text-right mono">${fmt.n(r.count)}</td>
+      `);
+      if (histSummary?.[0]) setText("card-po-hist-sub", `최근: ${fmt.ts(histSummary[0].latest_observed)}`);
+
+      // 6. po_sku 최근 변경 20개
+      const { data: poRecent } = await sb
+        .from("po_sku_current")
+        .select("po_id,sku_id,status,sku_name,qty_ordered,expected_at,last_changed_at")
+        .eq("is_active", true)
+        .order("last_changed_at", { ascending: false })
+        .limit(20);
+      setRows("tbl-po-recent", poRecent, (r) => `
+        <td class="mono">${r.po_id}</td>
+        <td class="mono">${r.sku_id}</td>
+        <td>${r.status || "-"}</td>
+        <td class="text-xs max-w-md truncate">${r.sku_name || "-"}</td>
+        <td class="text-right mono">${fmt.n(r.qty_ordered)}</td>
+        <td class="mono text-xs">${r.expected_at || "-"}</td>
+        <td class="mono text-xs text-gray-500">${fmt.ts(r.last_changed_at)}</td>
+      `);
+
+      // 7. sku_info 샘플
+      const { data: skuRows } = await sb
+        .from("sku_info")
+        .select("sku_id,sku_name,status,last_changed_at")
+        .eq("is_active", true)
+        .order("last_changed_at", { ascending: false })
+        .limit(20);
+      setRows("tbl-sku", skuRows, (r) => `
+        <td class="mono">${r.sku_id}</td>
+        <td class="text-xs max-w-md truncate">${r.sku_name || "-"}</td>
+        <td>${r.status || "-"}</td>
+        <td class="mono text-xs text-gray-500">${fmt.ts(r.last_changed_at)}</td>
+      `);
+      if (skuRows?.[0]) setText("card-sku-sub", `최근 변경: ${fmt.ts(skuRows[0].last_changed_at)}`);
+
+      // 8. milkrun versions
+      const { data: mkRows } = await sb
+        .from("milkrun_fee_versions")
+        .select("id,char_count,first_seen_at,last_seen_at,content_hash")
+        .order("id", { ascending: false });
+      setRows("tbl-milkrun", mkRows, (r) => `
+        <td class="mono">${r.id}</td>
+        <td class="text-right mono">${fmt.n(r.char_count)}</td>
+        <td class="mono text-xs">${fmt.ts(r.first_seen_at)}</td>
+        <td class="mono text-xs">${fmt.ts(r.last_seen_at)}</td>
+        <td class="mono text-xs text-gray-500">${(r.content_hash || "").slice(0, 12)}…</td>
+      `);
+      if (mkRows?.[0]) setText("card-milkrun-sub", `최신 ${fmt.n(mkRows[0].char_count)}자`);
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", loadAll);
+    loadAll().catch((err) => {
+      console.error(err);
+      alert("로드 실패: " + err.message);
+    });
+  </script>
+</body>
+</html>

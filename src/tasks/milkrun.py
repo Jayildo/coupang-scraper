@@ -15,15 +15,15 @@ def run(page):
     log.info("=" * 50)
     log.info("[TASK] 밀크런 이용 요금 안내 스크랩 시작")
 
-    # 물류 > Milkrun 메뉴 클릭 (영문 UI)
+    # 물류 > Milkrun 메뉴 클릭
     if not navigate_menu(page, "물류", "밀크런"):
-        log.warning("[MILKRUN] 메뉴 네비게이션 실패, 대시보드에서 재시도")
-        page.goto("https://supplier.coupang.com/dashboard/KR")
+        log.warning("[MILKRUN] 메뉴 네비게이션 실패, 직접 URL로 재시도")
+        page.goto("https://supplier.coupang.com/milkrun/useFee")
         time.sleep(4)
-        if not navigate_menu(page, "물류", "밀크런"):
-            log.error("[MILKRUN] 밀크런 접근 실패")
-            screenshot(page, "milkrun_nav_fail")
-            return False
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
 
     time.sleep(4)
     try:

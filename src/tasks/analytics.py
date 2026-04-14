@@ -1,284 +1,225 @@
-"""Task 3: 애널리틱스 > 프리미엄 데이터 2.0 > 일간 종합 성과 지표 > 당월 데이터 다운로드."""
+"""Task 4: 프리미엄 데이터 2.0 > 일간 종합 성과 지표 > 당월 데이터 다운로드.
+
+쿠팡이 /rpd/web-v2/ SPA를 Akamai Bot Manager로 보호하므로 Playwright로 SPA를
+mount할 수 없음. 대신 빌드된 main bundle JS를 분석해 식별한 비동기 다운로드
+API를 curl_cffi로 직접 호출.
+
+API 흐름:
+    1. GET  /rpd/v2/asyncdownload/requests?reportId=DAILY_PERF  → vendorId 추출
+    2. POST /rpd/v2/asyncdownload/request                       → 비동기 job 생성
+    3. GET  /rpd/v2/asyncdownload/requests (polling)            → status COMPLETED 대기
+    4. GET  /rpd/v2/asyncdownload/request/{reqId}/file/{fileId}/download → CSV bytes
+"""
+import json
 import time
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
-from tasks.helpers import (
-    navigate_menu, human_delay, short_delay,
-    download_file, screenshot, click_text, wait_and_click,
-)
+from tasks.helpers import DOWNLOAD_DIR, ensure_dirs
 
 log = logging.getLogger(__name__)
 
-# SPA 페이지 - 직접 URL 이동
-ANALYTICS_URL = "https://supplier.coupang.com/rpd/web-v2/"
+API_BASE = "https://supplier.coupang.com/rpd/v2/asyncdownload"
+REPORT_ID = "DAILY_PERF"
+DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "Referer": "https://supplier.coupang.com/rpd/web-v2/",
+}
 
 
 def run(page):
-    """프리미엄 데이터 2.0 일간 종합 성과 지표 다운로드."""
+    """프리미엄 데이터 2.0 일간 종합 성과 지표 다운로드 (API 직접 호출)."""
     log.info("=" * 50)
-    log.info("[TASK] 프리미엄 데이터 2.0 다운로드 시작")
+    log.info("[TASK] 프리미엄 데이터 2.0 다운로드 시작 (API 모드)")
 
-    # 페이지 이동
-    page.goto(ANALYTICS_URL)
-    time.sleep(5)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    time.sleep(5)  # SPA 렌더링 대기
+    # 브라우저 쿠키를 .cookies.json에 갱신 (Akamai BM 토큰 포함)
+    _refresh_cookies(page)
 
-    log.info(f"[ANALYTICS] 현재 URL: {page.url}")
-    screenshot(page, "analytics_loaded")
-
-    if "login" in page.url.lower():
-        log.error("[ANALYTICS] 세션 만료")
+    from session import get_http_session
+    session = get_http_session()
+    if not session:
+        log.error("[ANALYTICS] HTTP 세션 생성 실패 — 쿠키 없음")
         return False
 
-    # 1. 왼쪽 사이드바에서 "일간 종합 성과 지표" 클릭
-    short_delay(2, 3)
-    if not _click_sidebar_menu(page, "일간 종합 성과 지표"):
-        log.error("[ANALYTICS] '일간 종합 성과 지표' 사이드바 메뉴 못 찾음")
-        screenshot(page, "analytics_sidebar_fail")
+    # 1. vendorId 추출 (기존 history에서)
+    vendor_id = _fetch_vendor_id(session)
+    if not vendor_id:
+        log.error("[ANALYTICS] vendorId 추출 실패")
+        return False
+    log.info(f"[ANALYTICS] vendorId: {vendor_id}")
+
+    # 2. 당월 1일 ~ 어제 (D-1) 기간으로 다운로드 요청
+    today = date.today()
+    from_date = today.replace(day=1).strftime("%Y%m%d")
+    to_date = (today - timedelta(days=1)).strftime("%Y%m%d")
+    log.info(f"[ANALYTICS] 기간: {from_date} ~ {to_date}")
+
+    request_id = _create_download_request(session, vendor_id, from_date, to_date)
+    if not request_id:
+        log.error("[ANALYTICS] 다운로드 요청 생성 실패")
+        return False
+    log.info(f"[ANALYTICS] 요청 생성됨: requestId={request_id}")
+
+    # 3. polling
+    file_info = _poll_until_complete(session, request_id, max_wait=180)
+    if not file_info:
+        log.error("[ANALYTICS] 파일 생성 대기 시간 초과")
         return False
 
-    time.sleep(4)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    time.sleep(5)
-
-    screenshot(page, "analytics_daily_metrics")
-
-    # 2. Date: 월별 보기 → 당월 선택
-    _select_current_month(page)
-    short_delay(2, 3)
-
-    # 3. 검색 버튼
-    for text in ["검색", "Search", "조회"]:
-        if click_text(page, text, tag="button"):
-            break
-
-    time.sleep(4)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    time.sleep(5)
-
-    screenshot(page, "analytics_search_result")
-
-    # 4. 전체 데이터 다운로드 → 요청 → 다운로드
-    downloaded = _request_and_download(page)
-    if downloaded:
-        log.info(f"[ANALYTICS] 다운로드 완료: {downloaded}")
+    # 4. 다운로드
+    saved = _download_file(session, request_id, file_info)
+    if saved:
+        log.info(f"[ANALYTICS] 다운로드 완료: {saved}")
+        return True
     else:
-        log.error("[ANALYTICS] 다운로드 실패")
-        screenshot(page, "analytics_download_fail")
-
-    return bool(downloaded)
+        log.error("[ANALYTICS] 파일 다운로드 실패")
+        return False
 
 
-def _click_sidebar_menu(page, menu_text):
-    """왼쪽 사이드바에서 메뉴 클릭 (x < 300 영역)."""
-    # 사이드바 내 링크 찾기
-    for tag in ["a", "li", "div", "span", "button"]:
-        elements = page.query_selector_all(f'{tag}:has-text("{menu_text}")')
-        for el in elements:
-            try:
-                box = el.bounding_box()
-                if not box:
-                    continue
-                # 사이드바는 왼쪽에 위치 (x < 300)
-                if box["x"] < 300:
-                    inner = (el.inner_text() or "").strip()
-                    # 정확한 텍스트 매칭 (너무 긴 텍스트 제외)
-                    if menu_text in inner and len(inner) < 50:
-                        el.scroll_into_view_if_needed()
-                        short_delay(0.3, 0.8)
-                        el.click()
-                        log.info(f"[ANALYTICS] 사이드바 클릭: '{menu_text}'")
-                        return True
-            except Exception:
+def _refresh_cookies(page):
+    """브라우저 컨텍스트의 최신 쿠키를 .cookies.json에 저장 (Akamai BM 토큰 갱신)."""
+    try:
+        from config import COOKIE_FILE
+        cookies = page.context.cookies()
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cookies, f, ensure_ascii=False, indent=2)
+        log.info(f"[ANALYTICS] 쿠키 {len(cookies)}개 갱신")
+    except Exception as e:
+        log.warning(f"[ANALYTICS] 쿠키 갱신 실패: {e}")
+
+
+def _fetch_vendor_id(session):
+    """기존 history 첫 항목의 predicate에서 vendorId 추출."""
+    try:
+        r = session.get(
+            f"{API_BASE}/requests",
+            params={"reportId": REPORT_ID, "page": 1, "rowCountPerPage": 10},
+            headers=DEFAULT_HEADERS,
+            timeout=30,
+        )
+        if r.status_code != 200:
+            log.error(f"[ANALYTICS] history GET 실패: status={r.status_code}")
+            return None
+        data = r.json()
+        if not data.get("success"):
+            log.error(f"[ANALYTICS] history 응답 success=false: {data.get('message')}")
+            return None
+        contents = data.get("value", {}).get("contents", [])
+        for item in contents:
+            pred_str = item.get("predicate")
+            if not pred_str:
                 continue
-
-    # 폴백: 사이드바 영역 내 모든 링크 덤프
-    _dump_sidebar(page)
-    return False
-
-
-def _dump_sidebar(page):
-    """디버그: 사이드바 링크 목록."""
-    links = page.query_selector_all("a, li, span")
-    log.info("[DEBUG] 사이드바 영역 (x < 300) 요소:")
-    for el in links:
-        try:
-            box = el.bounding_box()
-            if box and box["x"] < 300 and 50 < box["y"] < 800:
-                txt = (el.inner_text() or "").strip()
-                if txt and len(txt) < 50 and "\n" not in txt:
-                    tag = el.evaluate("el => el.tagName")
-                    log.info(f"  [{tag}] x={box['x']:.0f} y={box['y']:.0f} '{txt}'")
-        except Exception:
-            pass
-
-
-def _select_current_month(page):
-    """월별 보기 선택 → 당월(최상단) 선택."""
-    # 월별 보기 버튼/탭 클릭
-    for text in ["월별", "월별 보기", "Monthly", "월간"]:
-        if click_text(page, text, tag="button,a,li,span,div,label", timeout=3000):
-            log.info(f"[ANALYTICS] '{text}' 선택")
-            short_delay(1, 2)
-            break
-
-    # 날짜/기간 셀렉터 찾기
-    now = datetime.now()
-    current_month_texts = [
-        now.strftime("%Y-%m"),
-        now.strftime("%Y.%m"),
-        now.strftime("%Y년 %m월"),
-        f"{now.year}년 {now.month}월",
-    ]
-
-    # 드롭다운/셀렉트 열기
-    date_selectors = [
-        'select', '[class*="date"]', '[class*="calendar"]',
-        '[class*="picker"]', '[class*="period"]',
-    ]
-
-    for sel in date_selectors:
-        elements = page.query_selector_all(sel)
-        for el in elements:
             try:
-                if not el.is_visible():
-                    continue
-                box = el.bounding_box()
-                if not box or box["y"] > 500 or box["x"] < 300:
-                    continue  # 사이드바 제외, 메인 콘텐츠 영역만
-
-                tag = el.evaluate("el => el.tagName")
-                if tag == "SELECT":
-                    options = el.query_selector_all("option")
-                    if options:
-                        # 첫 번째 옵션 = 당월 (최상단)
-                        val = options[0].get_attribute("value")
-                        el.select_option(value=val)
-                        txt = (options[0].inner_text() or "").strip()
-                        log.info(f"[ANALYTICS] 월 선택 (select): {txt}")
-                        return True
-                else:
-                    el.click()
-                    short_delay(1, 2)
-
-                    # 당월 텍스트 찾기
-                    for month_text in current_month_texts:
-                        if click_text(page, month_text, tag="li,div,span,a,button,option", timeout=2000):
-                            log.info(f"[ANALYTICS] 월 선택: {month_text}")
-                            return True
-
-                    # 첫 번째 옵션 (최상단 = 당월)
-                    items = page.query_selector_all('[class*="option"], [class*="item"], [class*="menu"] li')
-                    for item in items:
-                        try:
-                            ibox = item.bounding_box()
-                            if ibox and item.is_visible():
-                                txt = (item.inner_text() or "").strip()
-                                if txt and len(txt) < 30:
-                                    item.click()
-                                    log.info(f"[ANALYTICS] 첫 옵션 선택: {txt}")
-                                    return True
-                        except Exception:
-                            continue
-            except Exception:
+                pred = json.loads(pred_str)
+                vid = pred.get("vendorId")
+                if vid:
+                    return vid
+            except json.JSONDecodeError:
                 continue
-
-    log.warning("[ANALYTICS] 월 선택 실패")
-    screenshot(page, "analytics_month_select_fail")
-    return False
-
-
-def _request_and_download(page):
-    """전체 데이터 다운로드 → 요청 → 다운로드 목록 → 다운로드."""
-    # Step 1: 전체 데이터 다운로드 버튼
-    download_texts = [
-        "전체 데이터 다운로드", "전체 다운로드",
-        "데이터 다운로드", "다운로드", "Download",
-    ]
-    clicked = False
-    for text in download_texts:
-        if click_text(page, text, tag="button,a", timeout=3000):
-            clicked = True
-            break
-
-    if not clicked:
-        log.error("[ANALYTICS] '전체 데이터 다운로드' 버튼 못 찾음")
+        log.error("[ANALYTICS] history 비어있음 - vendorId 추출 불가")
+        return None
+    except Exception as e:
+        log.error(f"[ANALYTICS] vendorId fetch 에러: {e}")
         return None
 
-    short_delay(2, 3)
-    screenshot(page, "analytics_download_popup")
 
-    # Step 2: 팝업에서 '요청' 버튼
-    for text in ["요청", "Request"]:
-        if click_text(page, text, tag="button", timeout=5000):
-            break
-
-    short_delay(3, 5)
-    screenshot(page, "analytics_after_request")
-
-    # Step 3: 다운로드 목록 보기
-    for text in ["다운로드 목록 보기", "다운로드 목록", "목록 보기", "Download List"]:
-        if click_text(page, text, tag="button,a", timeout=5000):
-            break
-
-    short_delay(3, 5)
+def _create_download_request(session, vendor_id, from_date, to_date):
+    """비동기 다운로드 요청 생성. requestId 반환."""
+    filename = f"daily_performance_{from_date}{to_date}"
+    body = {
+        "reportId": REPORT_ID,
+        "filename": filename,
+        "comment": "일간 종합 성과 지표",
+        "parameter": {
+            "timeType": "DATE",
+            "from": from_date,
+            "to": to_date,
+            "vendorId": vendor_id,
+        },
+    }
     try:
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except Exception:
-        pass
-    time.sleep(3)
+        r = session.post(
+            f"{API_BASE}/request",
+            json=body,
+            headers={**DEFAULT_HEADERS, "Content-Type": "application/json"},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            log.error(f"[ANALYTICS] POST 실패: status={r.status_code}, body={r.text[:300]}")
+            return None
+        data = r.json()
+        if not data.get("success"):
+            log.error(f"[ANALYTICS] 요청 거부: {data.get('message')}")
+            return None
+        return data.get("value")
+    except Exception as e:
+        log.error(f"[ANALYTICS] POST 에러: {e}")
+        return None
 
-    screenshot(page, "analytics_download_list")
 
-    # Step 4: 최상단 다운로드 버튼
-    return _click_first_download(page)
+def _poll_until_complete(session, request_id, max_wait=180, interval=5):
+    """history GET을 polling해서 해당 requestId의 파일 정보 반환 (status COMPLETED).
 
-
-def _click_first_download(page):
-    """다운로드 목록에서 최상단 항목 다운로드."""
-    # 테이블 행에서 다운로드 버튼
-    rows = page.query_selector_all("tr, [class*='row'], [class*='list-item']")
-    for row in rows:
+    응답 contents[i].downloadExcelRequestFileDtos[0]가 채워지면 완료로 판단.
+    """
+    start = time.time()
+    while time.time() - start < max_wait:
         try:
-            for text in ["다운로드", "Download"]:
-                dl_btn = row.query_selector(f'button:has-text("{text}"), a:has-text("{text}")')
-                if dl_btn and dl_btn.is_visible():
-                    result = download_file(
-                        page,
-                        lambda p, btn=dl_btn: btn.click(),
-                        "analytics_premium"
-                    )
-                    return result
-        except Exception:
-            continue
-
-    # 전체에서 다운로드 버튼 (짧은 텍스트만)
-    for text in ["다운로드", "Download"]:
-        btns = page.query_selector_all(f'button:has-text("{text}"), a:has-text("{text}")')
-        for btn in btns:
-            try:
-                if btn.is_visible():
-                    inner = (btn.inner_text() or "").strip()
-                    if len(inner) < 15:
-                        result = download_file(
-                            page,
-                            lambda p, b=btn: b.click(),
-                            "analytics_premium"
-                        )
-                        return result
-            except Exception:
+            r = session.get(
+                f"{API_BASE}/requests",
+                params={"reportId": REPORT_ID, "page": 1, "rowCountPerPage": 10},
+                headers=DEFAULT_HEADERS,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                log.warning(f"[ANALYTICS] polling status={r.status_code}")
+                time.sleep(interval)
                 continue
-
-    log.warning("[ANALYTICS] 다운로드 목록에서 버튼 못 찾음")
+            contents = r.json().get("value", {}).get("contents", [])
+            item = next(
+                (c for c in contents if c.get("downloadExcelRequestId") == request_id),
+                None,
+            )
+            if item:
+                files = item.get("downloadExcelRequestFileDtos") or []
+                status = item.get("status", "")
+                if files and status.upper() in ("COMPLETED", "DONE", "SUCCESS"):
+                    log.info(f"[ANALYTICS] 파일 생성 완료 (status={status})")
+                    return files[0]
+                elapsed = int(time.time() - start)
+                log.info(f"[ANALYTICS] 생성 중... status={status} ({elapsed}s)")
+            else:
+                log.info(f"[ANALYTICS] requestId {request_id} 아직 history 미반영")
+        except Exception as e:
+            log.warning(f"[ANALYTICS] polling 에러: {e}")
+        time.sleep(interval)
     return None
+
+
+def _download_file(session, request_id, file_info):
+    """파일 다운로드 후 로컬 저장. 저장 경로 반환."""
+    file_id = file_info.get("downloadExcelRequestFileId")
+    base_filename = file_info.get("downloadFileName") or f"daily_performance_{request_id}"
+    if not file_id:
+        log.error("[ANALYTICS] downloadExcelRequestFileId 없음")
+        return None
+
+    url = f"{API_BASE}/request/{request_id}/file/{file_id}/download"
+    log.info(f"[ANALYTICS] 다운로드 URL: {url}")
+    try:
+        r = session.get(url, headers=DEFAULT_HEADERS, timeout=120)
+    except Exception as e:
+        log.error(f"[ANALYTICS] 다운로드 요청 실패: {e}")
+        return None
+
+    if r.status_code != 200 or len(r.content) < 100:
+        log.error(f"[ANALYTICS] 다운로드 실패: status={r.status_code}, size={len(r.content)}")
+        return None
+
+    ensure_dirs()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = DOWNLOAD_DIR / f"analytics_premium_{ts}_{base_filename}.csv"
+    with open(save_path, "wb") as f:
+        f.write(r.content)
+    log.info(f"[ANALYTICS] 저장 완료: {save_path} ({len(r.content)} bytes)")
+    return save_path
